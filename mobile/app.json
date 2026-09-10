@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "CafiPay",
+    "slug": "cafipay",
+    "version": "1.0.0",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTabletMode": true,
+      "bundleIdentifier": "com.cafipay.mobile"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.cafipay.mobile"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow CafiPay to access your camera to scan QR codes"
+        }
+      ]
+    ],
+    "permissions": [
+      "android.permission.CAMERA"
+    ],
+    "primaryColor": "#1E90FF"
+  }
+}
