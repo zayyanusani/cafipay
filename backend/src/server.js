@@ -11,6 +11,8 @@ import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import serviceRoutes from './routes/services.js';
 import billRoutes from './routes/bills.js';
+import { idempotency } from './middleware/idempotency.js';
+import { auditRequests } from './middleware/audit.js';
 
 const prisma = new PrismaClient();
 const app = express();
@@ -19,9 +21,11 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 if (!JWT_SECRET || JWT_SECRET.length < 32) throw new Error('JWT_SECRET must be set and contain at least 32 characters');
 
+app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',').map(s => s.trim()) || true }));
 app.use(express.json({ limit: '1mb' }));
+app.use(auditRequests);
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
 const qrCreateLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
@@ -89,7 +93,7 @@ app.get('/api/transactions', auth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-app.post('/api/qr/payments', auth, qrCreateLimiter, async (req, res, next) => {
+app.post('/api/qr/payments', auth, idempotency, qrCreateLimiter, async (req, res, next) => {
   try {
     const data = qrCreateSchema.parse(req.body);
     const expiresAt = new Date(Date.now() + data.expiresInMinutes * 60 * 1000);
@@ -111,7 +115,7 @@ app.get('/api/qr/payments/:reference', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-app.post('/api/qr/payments/:reference/pay', auth, qrPayLimiter, async (req, res, next) => {
+app.post('/api/qr/payments/:reference/pay', auth, idempotency, qrPayLimiter, async (req, res, next) => {
   try {
     const { reference } = qrReferenceSchema.parse(req.params);
     const result = await prisma.$transaction(async (tx) => {
@@ -141,8 +145,8 @@ app.post('/api/qr/payments/:reference/pay', auth, qrPayLimiter, async (req, res,
   }
 });
 
-app.use('/api/services', auth, serviceRoutes);
-app.use('/api/bills', auth, billRoutes);
+app.use('/api/services', auth, idempotency, serviceRoutes);
+app.use('/api/bills', auth, idempotency, billRoutes);
 
 app.post('/api/auth/logout', auth, (_req, res) => res.json({ message: 'Logout acknowledged; discard the token on the client' }));
 app.use((err, _req, res, _next) => { if (err instanceof z.ZodError) return res.status(400).json({ error: 'Validation failed', details: err.issues }); console.error(err); res.status(500).json({ error: 'Internal server error' }); });
