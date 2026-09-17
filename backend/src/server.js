@@ -10,15 +10,14 @@ import QRCode from 'qrcode';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import serviceRoutes from './routes/services.js';
+import billRoutes from './routes/bills.js';
 
 const prisma = new PrismaClient();
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
 const JWT_SECRET = process.env.JWT_SECRET;
 
-if (!JWT_SECRET || JWT_SECRET.length < 32) {
-  throw new Error('JWT_SECRET must be set and contain at least 32 characters');
-}
+if (!JWT_SECRET || JWT_SECRET.length < 32) throw new Error('JWT_SECRET must be set and contain at least 32 characters');
 
 app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',').map(s => s.trim()) || true }));
@@ -143,6 +142,7 @@ app.post('/api/qr/payments/:reference/pay', auth, qrPayLimiter, async (req, res,
 });
 
 app.use('/api/services', auth, serviceRoutes);
+app.use('/api/bills', auth, billRoutes);
 
 app.post('/api/auth/logout', auth, (_req, res) => res.json({ message: 'Logout acknowledged; discard the token on the client' }));
 app.use((err, _req, res, _next) => { if (err instanceof z.ZodError) return res.status(400).json({ error: 'Validation failed', details: err.issues }); console.error(err); res.status(500).json({ error: 'Internal server error' }); });
