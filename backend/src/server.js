@@ -11,6 +11,7 @@ import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import serviceRoutes from './routes/services.js';
 import billRoutes from './routes/bills.js';
+import auditRoutes from './routes/audit.js';
 import { idempotency } from './middleware/idempotency.js';
 import { auditRequests } from './middleware/audit.js';
 
@@ -147,6 +148,7 @@ app.post('/api/qr/payments/:reference/pay', auth, idempotency, qrPayLimiter, asy
 
 app.use('/api/services', auth, idempotency, serviceRoutes);
 app.use('/api/bills', auth, idempotency, billRoutes);
+app.use('/api/audit-logs', auth, auditRoutes);
 
 app.post('/api/auth/logout', auth, (_req, res) => res.json({ message: 'Logout acknowledged; discard the token on the client' }));
 app.use((err, _req, res, _next) => { if (err instanceof z.ZodError) return res.status(400).json({ error: 'Validation failed', details: err.issues }); console.error(err); res.status(500).json({ error: 'Internal server error' }); });
