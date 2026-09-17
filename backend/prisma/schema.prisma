@@ -16,6 +16,8 @@ model User {
   updatedAt    DateTime      @updatedAt
   wallet       Wallet?
   transactions Transaction[]
+  qrPayments   QrPayment[]   @relation("QrMerchant")
+  serviceOrders ServiceOrder[]
 
   @@index([email])
 }
@@ -43,4 +45,41 @@ model Transaction {
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+model QrPayment {
+  id          String   @id @default(cuid())
+  reference   String   @unique
+  merchantId  String
+  amount      Decimal  @db.Decimal(18, 2)
+  currency    String   @default("NGN")
+  description String?
+  status      String   @default("PENDING")
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  paidAt      DateTime?
+  merchant    User     @relation("QrMerchant", fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId, createdAt])
+  @@index([status, expiresAt])
+}
+
+model ServiceOrder {
+  id                String   @id @default(cuid())
+  reference         String   @unique
+  userId            String
+  type              String
+  network           String?
+  phone             String
+  amount            Decimal  @db.Decimal(18, 2)
+  currency          String   @default("NGN")
+  dataPlan          String?
+  status            String   @default("PROCESSING")
+  providerReference String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
 }
