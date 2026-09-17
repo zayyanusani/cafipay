@@ -2,12 +2,16 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { PrismaClient } from '@prisma/client';
 
 const port = Number(process.env.TEST_PORT || 4100);
 const baseUrl = `http://127.0.0.1:${port}`;
+const prisma = new PrismaClient();
 let serverProcess;
 let token;
 let secondToken;
+let userId;
+let secondUserId;
 let email;
 let secondEmail;
 
@@ -50,8 +54,9 @@ before(async () => {
   await waitForServer();
 });
 
-after(() => {
+after(async () => {
   if (serverProcess && !serverProcess.killed) serverProcess.kill('SIGTERM');
+  await prisma.$disconnect();
 });
 
 test('health endpoint is available', async () => {
@@ -68,6 +73,7 @@ test('registration creates a user and wallet', async () => {
   assert.equal(response.status, 201);
   assert.ok(body.token);
   assert.equal(body.user.email, email);
+  userId = body.user.id;
   token = body.token;
 });
 
@@ -143,7 +149,98 @@ test('second user can register and authenticate', async () => {
   });
   assert.equal(response.status, 201);
   secondToken = body.token;
+  secondUserId = body.user.id;
   assert.ok(secondToken);
+});
+
+test('wallet transfer succeeds and credits the recipient', async () => {
+  await prisma.wallet.update({ where: { userId: userId }, data: { balance: '5000.00' } });
+
+  const key = `transfer-${randomUUID()}`;
+  const { response, body } = await request('/api/wallet/transfer', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': key },
+    body: JSON.stringify({ recipientEmail: secondEmail, amount: 1200 }),
+  });
+
+  assert.equal(response.status, 201);
+  assert.equal(body.transaction.type, 'TRANSFER');
+  assert.equal(body.transaction.senderId, userId);
+  assert.equal(body.transaction.recipientId, secondUserId);
+
+  const sender = await prisma.wallet.findUnique({ where: { userId } });
+  const recipient = await prisma.wallet.findUnique({ where: { userId: secondUserId } });
+  assert.equal(Number(sender.balance), 3800);
+  assert.equal(Number(recipient.balance), 1200);
+});
+
+test('wallet transfer is idempotent', async () => {
+  const key = `transfer-${randomUUID()}`;
+  const options = {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': key },
+    body: JSON.stringify({ recipientEmail: secondEmail, amount: 100 }),
+  };
+  const first = await request('/api/wallet/transfer', options);
+  const second = await request('/api/wallet/transfer', options);
+  assert.equal(first.response.status, 201);
+  assert.equal(second.response.status, 201);
+  assert.equal(second.body.transaction.reference, first.body.transaction.reference);
+
+  const sender = await prisma.wallet.findUnique({ where: { userId } });
+  assert.equal(Number(sender.balance), 3700);
+});
+
+test('wallet transfer rejects insufficient balance without changing balances', async () => {
+  const senderBefore = await prisma.wallet.findUnique({ where: { userId } });
+  const recipientBefore = await prisma.wallet.findUnique({ where: { userId: secondUserId } });
+  const { response } = await request('/api/wallet/transfer', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': `transfer-${randomUUID()}` },
+    body: JSON.stringify({ recipientEmail: secondEmail, amount: 999999 }),
+  });
+  assert.equal(response.status, 400);
+  const senderAfter = await prisma.wallet.findUnique({ where: { userId } });
+  const recipientAfter = await prisma.wallet.findUnique({ where: { userId: secondUserId } });
+  assert.equal(Number(senderAfter.balance), Number(senderBefore.balance));
+  assert.equal(Number(recipientAfter.balance), Number(recipientBefore.balance));
+});
+
+test('wallet transfer rejects self transfer', async () => {
+  const { response } = await request('/api/wallet/transfer', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': `transfer-${randomUUID()}` },
+    body: JSON.stringify({ recipientEmail: email, amount: 100 }),
+  });
+  assert.equal(response.status, 400);
+});
+
+test('concurrent transfers never make the sender balance negative', async () => {
+  await prisma.wallet.update({ where: { userId }, data: { balance: '3000.00' } });
+  await prisma.wallet.update({ where: { userId: secondUserId }, data: { balance: '0.00' } });
+
+  const requests = Array.from({ length: 8 }, (_, index) => request('/api/wallet/transfer', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': `concurrent-${randomUUID()}-${index}` },
+    body: JSON.stringify({ recipientEmail: secondEmail, amount: 750 }),
+  }));
+  const results = await Promise.all(requests);
+  const successful = results.filter(({ response }) => response.status === 201);
+  const sender = await prisma.wallet.findUnique({ where: { userId } });
+  const recipient = await prisma.wallet.findUnique({ where: { userId: secondUserId } });
+
+  assert.ok(successful.length <= 4);
+  assert.ok([201, 400, 409].includes(results[0].response.status));
+  assert.ok(Number(sender.balance) >= 0);
+  assert.equal(Number(sender.balance) + Number(recipient.balance), 3000);
+});
+
+test('transaction history includes transfer counterparty records', async () => {
+  const { response, body } = await request('/api/wallet/transactions', {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(response.status, 200);
+  assert.ok(body.transactions.some(tx => tx.type === 'TRANSFER' && tx.recipientId === secondUserId));
 });
 
 test('audit logs are available to authenticated users', async () => {

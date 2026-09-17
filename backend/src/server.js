@@ -12,6 +12,7 @@ import { z } from 'zod';
 import serviceRoutes from './routes/services.js';
 import billRoutes from './routes/bills.js';
 import auditRoutes from './routes/audit.js';
+import walletRoutes from './routes/wallet.js';
 import fundingRoutes, { handleFundingWebhook, verifyFundingWebhook } from './routes/funding.js';
 import { idempotency } from './middleware/idempotency.js';
 import { auditRequests } from './middleware/audit.js';
@@ -97,6 +98,8 @@ app.get('/api/transactions', auth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+app.use('/api/wallet', auth, idempotency, walletRoutes);
+
 app.post('/api/qr/payments', auth, idempotency, qrCreateLimiter, async (req, res, next) => {
   try {
     const data = qrCreateSchema.parse(req.body);
@@ -112,7 +115,7 @@ app.post('/api/qr/payments', auth, idempotency, qrCreateLimiter, async (req, res
 app.get('/api/qr/payments/:reference', async (req, res, next) => {
   try {
     const { reference } = qrReferenceSchema.parse(req.params);
-    const payment = await prisma.qrPayment.findUnique({ where: { reference }, select: { reference: true, amount: true, currency: true, description: true, status: true, expiresAt: true, createdAt: true, merchant: { select: { id: true, name: true, email: true } } } });
+    const payment = await prisma.qrPayment.findUnique({ where: { reference }, select: { reference: true, amount: true, currency: true, description: true, status: true, expiresAt: true, createdAt: true, merchant: { select: { id: true, name: true, email: true } } });
     if (!payment) return res.status(404).json({ error: 'QR payment not found' });
     if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) { await prisma.qrPayment.update({ where: { reference }, data: { status: 'EXPIRED' } }); return res.status(410).json({ error: 'QR payment has expired' }); }
     res.json({ payment });
@@ -167,7 +170,7 @@ app.use('/api/bills', auth, idempotency, billRoutes);
 app.use('/api/audit-logs', auth, auditRoutes);
 
 app.post('/api/auth/logout', auth, (_req, res) => res.json({ message: 'Logout acknowledged; discard the token on the client' }));
-app.use((err, _req, res, _next) => { if (err instanceof z.ZodError) return res.status(400).json({ error: 'Validation failed', details: err.issues }); console.error(err); res.status(500).json({ error: 'Internal server error' }); });
+app.use((err, _req, res, _next) => { if (err instanceof z.ZodError) return res.status(400).json({ error: 'Validation failed', details: err.issues }); console.error(err); res.status(err?.status || 500).json({ error: err?.message || 'Internal server error' }); });
 const server = app.listen(PORT, () => console.log(`CafiPay API listening on port ${PORT}`));
 process.on('SIGINT', async () => { server.close(); await prisma.$disconnect(); process.exit(0); });
 process.on('SIGTERM', async () => { server.close(); await prisma.$disconnect(); process.exit(0); });
