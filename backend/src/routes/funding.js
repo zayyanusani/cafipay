@@ -7,12 +7,7 @@ import { initializeFunding, verifyFunding } from '../funding-provider.js';
 const prisma = new PrismaClient();
 const router = Router();
 
-const initiateSchema = z.object({
-  amount: z.coerce.number().positive().finite().min(100).max(100000000),
-  currency: z.string().trim().length(3).default('NGN'),
-  callbackUrl: z.string().url().max(2048).optional(),
-});
-
+const initiateSchema = z.object({ amount: z.coerce.number().positive().finite().min(100).max(100000000), currency: z.string().trim().length(3).default('NGN'), callbackUrl: z.string().url().max(2048).optional() });
 function reference() { return `CAFDEP-${crypto.randomBytes(12).toString('hex').toUpperCase()}`; }
 function webhookSignature(rawBody, secret) { return crypto.createHmac('sha512', secret).update(rawBody).digest('hex'); }
 
@@ -22,20 +17,11 @@ router.post('/initiate', async (req, res, next) => {
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { id: true, email: true } });
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (data.currency.toUpperCase() !== 'NGN') return res.status(400).json({ error: 'Only NGN funding is currently supported by Paystack integration' });
-
     const fundingReference = reference();
-    const order = await prisma.fundingOrder.create({
-      data: { reference: fundingReference, userId: user.id, amount: data.amount.toFixed(2), currency: 'NGN', provider: 'paystack', metadata: { callbackUrl: data.callbackUrl || null } },
-      select: { reference: true, amount: true, currency: true, provider: true, status: true, paymentUrl: true, createdAt: true },
-    });
-
+    const order = await prisma.fundingOrder.create({ data: { reference: fundingReference, userId: user.id, amount: data.amount.toFixed(2), currency: 'NGN', provider: 'paystack', metadata: { callbackUrl: data.callbackUrl || null } }, select: { reference: true, amount: true, currency: true, provider: true, status: true, paymentUrl: true, createdAt: true } });
     try {
       const initialized = await initializeFunding({ reference: order.reference, amount: order.amount, currency: order.currency, email: user.email, callbackUrl: data.callbackUrl || process.env.FUNDING_CALLBACK_URL || undefined });
-      const updated = await prisma.fundingOrder.update({
-        where: { reference: order.reference },
-        data: { providerReference: initialized.providerReference, paymentUrl: initialized.paymentUrl, metadata: { callbackUrl: data.callbackUrl || process.env.FUNDING_CALLBACK_URL || null, accessCode: initialized.accessCode } },
-        select: { reference: true, amount: true, currency: true, provider: true, providerReference: true, status: true, paymentUrl: true, createdAt: true },
-      });
+      const updated = await prisma.fundingOrder.update({ where: { reference: order.reference }, data: { providerReference: initialized.providerReference, paymentUrl: initialized.paymentUrl, metadata: { callbackUrl: data.callbackUrl || process.env.FUNDING_CALLBACK_URL || null, accessCode: initialized.accessCode } }, select: { reference: true, amount: true, currency: true, provider: true, providerReference: true, status: true, paymentUrl: true, createdAt: true } });
       return res.status(201).json({ message: 'Funding initialized', funding: updated, accessCode: initialized.accessCode });
     } catch (error) {
       await prisma.fundingOrder.update({ where: { reference: order.reference }, data: { status: 'FAILED', metadata: { error: error.message } } });
@@ -51,11 +37,9 @@ router.post('/:reference/verify', async (req, res, next) => {
     const order = await prisma.fundingOrder.findFirst({ where: { reference: req.params.reference, userId: req.user.id } });
     if (!order) return res.status(404).json({ error: 'Funding order not found' });
     if (order.status === 'SUCCESS') return res.json({ message: 'Funding already completed', funding: order });
-
     const payment = await verifyFunding(order.providerReference || order.reference);
     if (payment.reference !== order.providerReference && payment.reference !== order.reference) return res.status(502).json({ error: 'Provider reference mismatch' });
-    const amount = Number(payment.amount) / 100;
-    const result = await handleFundingWebhook({ reference: order.reference, providerReference: payment.reference, status: payment.status, amount, currency: payment.currency });
+    const result = await handleFundingWebhook({ reference: order.reference, providerReference: payment.reference, status: payment.status, amount: Number(payment.amount) / 100, currency: payment.currency });
     res.json({ message: result.order.status === 'SUCCESS' ? 'Funding verified and wallet credited' : 'Funding status checked', funding: result.order });
   } catch (error) {
     if (error.code === 'PROVIDER_TIMEOUT') return res.status(504).json({ error: 'Payment verification timed out' });
@@ -82,9 +66,11 @@ export function verifyFundingWebhook(req) {
 }
 
 export async function handleFundingWebhook(payload) {
-  const referenceValue = payload.reference || payload.merchantReference;
-  const providerReference = payload.providerReference || payload.transactionId || payload.id;
-  const status = String(payload.status || '').toUpperCase();
+  const isPaystackEvent = payload?.event && payload?.data;
+  const event = isPaystackEvent ? payload.data : payload;
+  const referenceValue = event.reference || event.merchantReference;
+  const providerReference = event.reference || event.providerReference || event.transactionId || event.id;
+  const status = String(event.status || (payload.event === 'charge.success' ? 'SUCCESS' : payload.event || '')).toUpperCase();
   if (!referenceValue) throw Object.assign(new Error('Missing funding reference'), { statusCode: 400 });
 
   return prisma.$transaction(async (tx) => {
@@ -96,13 +82,14 @@ export async function handleFundingWebhook(payload) {
       if (failed) await tx.fundingOrder.update({ where: { id: order.id }, data: { status: 'FAILED', providerReference: providerReference || order.providerReference } });
       return { alreadyProcessed: false, order: failed ? { ...order, status: 'FAILED' } : order };
     }
-    if (payload.amount !== undefined && Number(payload.amount) !== Number(order.amount)) throw Object.assign(new Error('Funding amount mismatch'), { statusCode: 400 });
-    if (payload.currency && String(payload.currency).toUpperCase() !== order.currency) throw Object.assign(new Error('Funding currency mismatch'), { statusCode: 400 });
+    const rawAmount = event.amount;
+    const normalizedAmount = isPaystackEvent ? Number(rawAmount) / 100 : Number(rawAmount);
+    if (rawAmount !== undefined && normalizedAmount !== Number(order.amount)) throw Object.assign(new Error('Funding amount mismatch'), { statusCode: 400 });
+    if (event.currency && String(event.currency).toUpperCase() !== order.currency) throw Object.assign(new Error('Funding currency mismatch'), { statusCode: 400 });
 
     const wallet = await tx.wallet.findUnique({ where: { userId: order.userId } });
     if (!wallet) throw Object.assign(new Error('Wallet not found'), { statusCode: 404 });
     if (wallet.currency !== order.currency) throw Object.assign(new Error('Wallet currency mismatch'), { statusCode: 400 });
-
     await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: order.amount } } });
     await tx.transaction.create({ data: { reference: `CAF-${crypto.randomUUID().replaceAll('-', '').slice(0, 24).toUpperCase()}`, userId: order.userId, type: 'WALLET_FUNDING', amount: order.amount, currency: order.currency, status: 'SUCCESS', description: `Wallet funding ${order.reference}` } });
     const completed = await tx.fundingOrder.update({ where: { id: order.id }, data: { status: 'SUCCESS', providerReference: providerReference || order.providerReference }, select: { reference: true, amount: true, currency: true, provider: true, providerReference: true, status: true, createdAt: true, updatedAt: true } });
