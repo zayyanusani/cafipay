@@ -4,7 +4,7 @@ import { PrismaClient } from '@prisma/client';
 export const prisma = new PrismaClient();
 
 export function transactionReference() {
-  return `CAF-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
+  return `CAF-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
 }
 
 export async function transferFunds({ senderId, recipientEmail, amount }) {
@@ -21,26 +21,35 @@ export async function transferFunds({ senderId, recipientEmail, amount }) {
     if (!sender?.wallet) throw Object.assign(new Error('Sender wallet not found'), { status: 404 });
     if (!recipient?.wallet) throw Object.assign(new Error('Recipient wallet not found'), { status: 404 });
     if (sender.id === recipient.id) throw Object.assign(new Error('You cannot transfer to yourself'), { status: 400 });
-    if (sender.wallet.balance < amount) throw Object.assign(new Error('Insufficient balance'), { status: 400 });
+    if (sender.wallet.currency !== recipient.wallet.currency) throw Object.assign(new Error('Currency mismatch'), { status: 400 });
 
-    const reference = transactionReference();
-
-    await tx.wallet.update({ where: { id: sender.wallet.id }, data: { balance: { decrement: amount } } });
-    await tx.wallet.update({ where: { id: recipient.wallet.id }, data: { balance: { increment: amount } } });
-
-    const transaction = await tx.transaction.create({
-      data: {
-        reference,
-        amount,
-        type: 'TRANSFER',
-        status: 'SUCCESS',
-        senderId: sender.id,
-        recipientId: recipient.id
-      }
+    const senderUpdated = await tx.wallet.updateMany({
+      where: { id: sender.wallet.id, currency: sender.wallet.currency, balance: { gte: amount } },
+      data: { balance: { decrement: amount } }
     });
 
-    return transaction;
-  });
+    if (senderUpdated.count !== 1) throw Object.assign(new Error('Insufficient balance'), { status: 400 });
+
+    await tx.wallet.update({
+      where: { id: recipient.wallet.id },
+      data: { balance: { increment: amount } }
+    });
+
+    const reference = transactionReference();
+    return tx.transaction.create({
+      data: {
+        reference,
+        userId: sender.id,
+        senderId: sender.id,
+        recipientId: recipient.id,
+        amount,
+        currency: sender.wallet.currency,
+        type: 'TRANSFER',
+        status: 'SUCCESS',
+        description: `Transfer to ${recipient.email}`
+      }
+    });
+  }, { isolationLevel: 'Serializable' });
 
   return result;
 }
