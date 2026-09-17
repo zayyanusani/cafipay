@@ -26,10 +26,7 @@ export async function idempotency(req, res, next) {
 
   const hash = requestHash(req);
   try {
-    const existing = await prisma.idempotencyKey.findUnique({
-      where: { userId_key: { userId: req.user.id, key } },
-    });
-
+    const existing = await prisma.idempotencyKey.findUnique({ where: { userId_key: { userId: req.user.id, key } } });
     if (existing) {
       if (existing.requestHash !== hash) return res.status(409).json({ error: 'Idempotency-Key was already used with a different request' });
       if (existing.status === 'COMPLETED') {
@@ -39,13 +36,12 @@ export async function idempotency(req, res, next) {
       return res.status(409).json({ error: 'A request with this Idempotency-Key is already processing' });
     }
 
-    await prisma.idempotencyKey.create({ data: { userId: req.user.id, key, requestHash: hash } });
-
+    const created = await prisma.idempotencyKey.create({ data: { userId: req.user.id, key, requestHash: hash } });
     const originalJson = res.json.bind(res);
     res.json = async (body) => {
       try {
         await prisma.idempotencyKey.update({
-          where: { id: existing?.id || (await prisma.idempotencyKey.findUnique({ where: { userId_key: { userId: req.user.id, key } } })).id },
+          where: { id: created.id },
           data: { status: 'COMPLETED', responseStatus: res.statusCode, responseBody: body },
         });
       } catch (error) {
