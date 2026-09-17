@@ -12,6 +12,7 @@ import { z } from 'zod';
 import serviceRoutes from './routes/services.js';
 import billRoutes from './routes/bills.js';
 import auditRoutes from './routes/audit.js';
+import fundingRoutes, { handleFundingWebhook, verifyFundingWebhook } from './routes/funding.js';
 import { idempotency } from './middleware/idempotency.js';
 import { auditRequests } from './middleware/audit.js';
 
@@ -25,12 +26,14 @@ if (!JWT_SECRET || JWT_SECRET.length < 32) throw new Error('JWT_SECRET must be s
 app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',').map(s => s.trim()) || true }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '1mb', verify: (req, _res, buffer) => { req.rawBody = buffer.toString('utf8'); } }));
 app.use(auditRequests);
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
 const qrCreateLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
 const qrPayLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
+const fundingLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false });
+const fundingWebhookLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false });
 
 const registerSchema = z.object({ name: z.string().trim().min(2).max(100), email: z.string().trim().email().max(254).transform(v => v.toLowerCase()), password: z.string().min(8).max(72) });
 const loginSchema = z.object({ email: z.string().trim().email().transform(v => v.toLowerCase()), password: z.string().min(1).max(72) });
@@ -146,6 +149,19 @@ app.post('/api/qr/payments/:reference/pay', auth, idempotency, qrPayLimiter, asy
   }
 });
 
+app.post('/api/wallet/funding/webhook', fundingWebhookLimiter, async (req, res, next) => {
+  try {
+    if (!verifyFundingWebhook(req)) return res.status(401).json({ error: 'Invalid webhook signature' });
+    const result = await handleFundingWebhook(req.body);
+    res.json({ received: true, ...result });
+  } catch (err) {
+    if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    if (err?.code === 'P2034') return res.status(409).json({ error: 'Funding conflict; retry webhook safely' });
+    next(err);
+  }
+});
+
+app.use('/api/wallet/funding', auth, idempotency, fundingLimiter, fundingRoutes);
 app.use('/api/services', auth, idempotency, serviceRoutes);
 app.use('/api/bills', auth, idempotency, billRoutes);
 app.use('/api/audit-logs', auth, auditRoutes);
