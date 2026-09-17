@@ -19,6 +19,7 @@ model User {
   qrPayments     QrPayment[]      @relation("QrMerchant")
   serviceOrders  ServiceOrder[]
   billOrders     BillOrder[]
+  fundingOrders  FundingOrder[]
   auditLogs      AuditLog[]
   idempotencyKeys IdempotencyKey[]
 
@@ -99,6 +100,25 @@ model BillOrder {
   metadata          Json?
   status            String   @default("PROCESSING")
   providerReference String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+model FundingOrder {
+  id                String   @id @default(cuid())
+  reference         String   @unique
+  userId            String
+  amount            Decimal  @db.Decimal(18, 2)
+  currency          String   @default("NGN")
+  provider          String
+  providerReference String?  @unique
+  status            String   @default("PENDING")
+  paymentUrl        String?
+  metadata          Json?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
