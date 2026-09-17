@@ -5,7 +5,8 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
+import QRCode from 'qrcode';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 
@@ -23,6 +24,8 @@ app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',').map(s => s.trim()) ||
 app.use(express.json({ limit: '1mb' }));
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
+const qrCreateLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
+const qrPayLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
 
 const registerSchema = z.object({
   name: z.string().trim().min(2).max(100),
@@ -34,6 +37,15 @@ const loginSchema = z.object({
   email: z.string().trim().email().transform(v => v.toLowerCase()),
   password: z.string().min(1).max(72)
 });
+
+const qrCreateSchema = z.object({
+  amount: z.coerce.number().positive().finite().max(100000000),
+  currency: z.string().trim().length(3).default('NGN'),
+  description: z.string().trim().max(200).optional(),
+  expiresInMinutes: z.coerce.number().int().min(1).max(1440).default(30)
+});
+
+const qrReferenceSchema = z.object({ reference: z.string().regex(/^CAFQR-[A-Z0-9]{24}$/) });
 
 function signToken(user) {
   return jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '1h' });
@@ -49,6 +61,14 @@ function auth(req, res, next) {
   } catch {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+}
+
+function qrReference() {
+  return `CAFQR-${randomBytes(12).toString('hex').toUpperCase()}`;
+}
+
+function toMoney(value) {
+  return Number(value).toFixed(2);
 }
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'CafiPay API' }));
@@ -114,8 +134,141 @@ app.get('/api/transactions', auth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Create a merchant QR payment request. The QR contains only an opaque payment reference.
+app.post('/api/qr/payments', auth, qrCreateLimiter, async (req, res, next) => {
+  try {
+    const data = qrCreateSchema.parse(req.body);
+    const expiresAt = new Date(Date.now() + data.expiresInMinutes * 60 * 1000);
+    const reference = qrReference();
+
+    const payment = await prisma.qrPayment.create({
+      data: {
+        reference,
+        merchantId: req.user.id,
+        amount: toMoney(data.amount),
+        currency: data.currency.toUpperCase(),
+        description: data.description,
+        expiresAt
+      },
+      select: { reference: true, amount: true, currency: true, description: true, status: true, expiresAt: true, createdAt: true }
+    });
+
+    const payload = JSON.stringify({ type: 'CAFIPAY_QR', reference: payment.reference });
+    const qrDataUrl = await QRCode.toDataURL(payload, { errorCorrectionLevel: 'M', margin: 2, width: 320 });
+
+    res.status(201).json({
+      message: 'QR payment created',
+      payment,
+      qr: { payload, dataUrl: qrDataUrl }
+    });
+  } catch (err) { next(err); }
+});
+
+// Retrieve a QR payment before paying it.
+app.get('/api/qr/payments/:reference', async (req, res, next) => {
+  try {
+    const { reference } = qrReferenceSchema.parse(req.params);
+    const payment = await prisma.qrPayment.findUnique({
+      where: { reference },
+      select: { reference: true, amount: true, currency: true, description: true, status: true, expiresAt: true, createdAt: true, merchant: { select: { id: true, name: true, email: true } } }
+    });
+
+    if (!payment) return res.status(404).json({ error: 'QR payment not found' });
+    if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) {
+      await prisma.qrPayment.update({ where: { reference }, data: { status: 'EXPIRED' } });
+      return res.status(410).json({ error: 'QR payment has expired' });
+    }
+
+    res.json({ payment });
+  } catch (err) { next(err); }
+});
+
+// Pay a QR payment atomically: debit payer, credit merchant, mark QR paid, write audit transactions.
+app.post('/api/qr/payments/:reference/pay', auth, qrPayLimiter, async (req, res, next) => {
+  try {
+    const { reference } = qrReferenceSchema.parse(req.params);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const payment = await tx.qrPayment.findUnique({ where: { reference } });
+      if (!payment) {
+        const error = new Error('QR payment not found');
+        error.statusCode = 404;
+        throw error;
+      }
+      if (payment.merchantId === req.user.id) {
+        const error = new Error('Merchant cannot pay its own QR payment');
+        error.statusCode = 400;
+        throw error;
+      }
+      if (payment.status !== 'PENDING') {
+        const error = new Error(`QR payment is ${payment.status.toLowerCase()}`);
+        error.statusCode = 409;
+        throw error;
+      }
+      if (payment.expiresAt <= new Date()) {
+        await tx.qrPayment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' } });
+        const error = new Error('QR payment has expired');
+        error.statusCode = 410;
+        throw error;
+      }
+
+      const payerWallet = await tx.wallet.findUnique({ where: { userId: req.user.id } });
+      const merchantWallet = await tx.wallet.findUnique({ where: { userId: payment.merchantId } });
+      if (!payerWallet || !merchantWallet) {
+        const error = new Error('Wallet not found');
+        error.statusCode = 404;
+        throw error;
+      }
+      if (payerWallet.currency !== payment.currency || merchantWallet.currency !== payment.currency) {
+        const error = new Error('Currency mismatch');
+        error.statusCode = 400;
+        throw error;
+      }
+      if (payerWallet.balance.lessThan(payment.amount)) {
+        const error = new Error('Insufficient wallet balance');
+        error.statusCode = 400;
+        throw error;
+      }
+
+      const payerUpdated = await tx.wallet.updateMany({
+        where: { id: payerWallet.id, balance: { gte: payment.amount } },
+        data: { balance: { decrement: payment.amount } }
+      });
+      if (payerUpdated.count !== 1) {
+        const error = new Error('Insufficient wallet balance');
+        error.statusCode = 400;
+        throw error;
+      }
+
+      await tx.wallet.update({ where: { id: merchantWallet.id }, data: { balance: { increment: payment.amount } } });
+
+      const baseReference = `CAF-${randomUUID().replaceAll('-', '').slice(0, 24).toUpperCase()}`;
+      const merchantReference = `${baseReference}-M`;
+      await tx.transaction.createMany({
+        data: [
+          { reference: baseReference, userId: req.user.id, type: 'QR_PAYMENT', amount: payment.amount, currency: payment.currency, status: 'SUCCESS', description: payment.description || `QR payment to ${payment.merchantId}` },
+          { reference: merchantReference, userId: payment.merchantId, type: 'QR_RECEIPT', amount: payment.amount, currency: payment.currency, status: 'SUCCESS', description: payment.description || `QR payment received from ${req.user.email}` }
+        ]
+      });
+
+      const paid = await tx.qrPayment.update({
+        where: { id: payment.id, status: 'PENDING' },
+        data: { status: 'PAID', paidAt: new Date() },
+        select: { reference: true, amount: true, currency: true, description: true, status: true, expiresAt: true, paidAt: true }
+      });
+
+      return { payment: paid, transactionReference: baseReference };
+    }, { isolationLevel: 'Serializable' });
+
+    res.json({ message: 'QR payment successful', ...result });
+  } catch (err) {
+    if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    if (err?.code === 'P2034') return res.status(409).json({ error: 'Payment conflict; please retry' });
+    next(err);
+  }
+});
+
 app.post('/api/auth/logout', auth, (_req, res) => {
-  // JWTs are stateless. For immediate revocation, add a server-side token denylist/session table.
   res.json({ message: 'Logout acknowledged; discard the token on the client' });
 });
 
