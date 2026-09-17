@@ -19,6 +19,7 @@
     "express-rate-limit": "latest",
     "helmet": "latest",
     "jsonwebtoken": "latest",
+    "qrcode": "latest",
     "zod": "latest"
   },
   "devDependencies": {
