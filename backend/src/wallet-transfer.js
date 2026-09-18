@@ -14,7 +14,11 @@ export async function transferFunds({ senderId, recipientEmail, amount }) {
     throw error;
   }
 
-  const result = await prisma.$transaction(async (tx) => {
+  const maxAttempts = 4;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const result = await prisma.$transaction(async (tx) => {
     const sender = await tx.user.findUnique({ where: { id: senderId }, include: { wallet: true } });
     const recipient = await tx.user.findUnique({ where: { email: recipientEmail.toLowerCase() }, include: { wallet: true } });
 
@@ -49,7 +53,16 @@ export async function transferFunds({ senderId, recipientEmail, amount }) {
         description: `Transfer to ${recipient.email}`
       }
     });
-  }, { isolationLevel: 'Serializable' });
+      }, { isolationLevel: 'Serializable' });
 
-  return result;
+      return result;
+    } catch (error) {
+      // PostgreSQL can abort a Serializable transaction when concurrent transfers
+      // touch the same wallet. Retry those transient serialization failures.
+      if (error?.code !== 'P2034' || attempt === maxAttempts) throw error;
+      await new Promise(resolve => setTimeout(resolve, 10 * attempt));
+    }
+  }
+
+  throw new Error('Transfer could not be completed');
 }
