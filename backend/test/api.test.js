@@ -242,6 +242,56 @@ test('concurrent transfers never make the sender balance negative', async () => 
   assert.equal(Number(sender.balance) + Number(recipient.balance), 3000);
 });
 
+test('transaction lookup is protected by participant ownership', async () => {
+  const history = await request('/api/wallet/transactions', {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const transfer = history.body.transactions.find(tx => tx.type === 'TRANSFER' && tx.senderId === userId && tx.recipientId === secondUserId);
+  assert.ok(transfer?.reference);
+
+  const senderLookup = await request(`/api/wallet/transactions/${transfer.reference}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(senderLookup.response.status, 200);
+  assert.equal(senderLookup.body.transaction.reference, transfer.reference);
+
+  const recipientLookup = await request(`/api/wallet/transactions/${transfer.reference}`, {
+    headers: { authorization: `Bearer ${secondToken}` },
+  });
+  assert.equal(recipientLookup.response.status, 200);
+  assert.equal(recipientLookup.body.transaction.reference, transfer.reference);
+
+  const unrelatedEmail = `unrelated-${randomUUID()}@example.com`;
+  const unrelated = await request('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Unrelated Test User', email: unrelatedEmail, password: 'StrongPass789!' }),
+  });
+  assert.equal(unrelated.response.status, 201);
+
+  const unrelatedLookup = await request(`/api/wallet/transactions/${transfer.reference}`, {
+    headers: { authorization: `Bearer ${unrelated.body.token}` },
+  });
+  assert.equal(unrelatedLookup.response.status, 404);
+
+  const unauthenticated = await request(`/api/wallet/transactions/${transfer.reference}`);
+  assert.equal(unauthenticated.response.status, 401);
+});
+
+test('transaction lookup validates references and returns 404 for missing references', async () => {
+  const invalidShort = await request('/api/wallet/transactions/short');
+  assert.equal(invalidShort.response.status, 401);
+
+  const invalidShortAuthenticated = await request('/api/wallet/transactions/short', {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(invalidShortAuthenticated.response.status, 400);
+
+  const missing = await request(`/api/wallet/transactions/MISSING-${randomUUID()}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(missing.response.status, 404);
+});
+
 test('transaction history includes transfer counterparty records', async () => {
   const { response, body } = await request('/api/wallet/transactions', {
     headers: { authorization: `Bearer ${token}` },
