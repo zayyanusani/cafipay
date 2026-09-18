@@ -1,7 +1,7 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 
 const port = Number(process.env.TEST_PORT || 4100);
@@ -53,6 +53,7 @@ before(async () => {
       FUNDING_PROVIDER_URL: '',
       FUNDING_PROVIDER_API_KEY: '',
       FUNDING_WEBHOOK_SECRET: 'ci-webhook-secret',
+      PAYSTACK_SECRET_KEY: 'ci-paystack-secret',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -147,6 +148,107 @@ test('funding initialization fails safely when provider is not configured', asyn
   });
   assert.equal(response.status, 503);
   assert.match(body.error, /not configured/i);
+});
+
+test('funding webhook rejects missing or invalid signatures', async () => {
+  const payload = JSON.stringify({ reference: 'CAFDEP-MISSING', status: 'SUCCESS', amount: 5000, currency: 'NGN' });
+  const missing = await request('/api/wallet/funding/webhook', {
+    method: 'POST',
+    body: payload,
+  });
+  assert.equal(missing.response.status, 401);
+
+  const invalid = await request('/api/wallet/funding/webhook', {
+    method: 'POST',
+    headers: { 'x-paystack-signature': 'invalid-signature' },
+    body: payload,
+  });
+  assert.equal(invalid.response.status, 401);
+});
+
+test('funding webhook credits wallet once and is idempotent', async () => {
+  const fundingReference = `CAFDEP-${randomUUID().replaceAll('-', '').slice(0, 24).toUpperCase()}`;
+  await prisma.fundingOrder.create({
+    data: {
+      reference: fundingReference,
+      userId,
+      amount: '5000.00',
+      currency: 'NGN',
+      provider: 'paystack',
+      status: 'PENDING',
+    },
+  });
+
+  const payload = JSON.stringify({
+    reference: fundingReference,
+    providerReference: `paystack-${randomUUID()}`,
+    status: 'SUCCESS',
+    amount: 5000,
+    currency: 'NGN',
+  });
+  const signature = createHmac('sha512', 'ci-paystack-secret').update(payload).digest('hex');
+  const options = {
+    method: 'POST',
+    headers: { 'x-paystack-signature': signature },
+    body: payload,
+  };
+
+  const before = await prisma.wallet.findUnique({ where: { userId } });
+  const first = await request('/api/wallet/funding/webhook', options);
+  assert.equal(first.response.status, 200);
+  assert.equal(first.body.order.status, 'SUCCESS');
+
+  const afterFirst = await prisma.wallet.findUnique({ where: { userId } });
+  assert.equal(Number(afterFirst.balance) - Number(before.balance), 5000);
+
+  const second = await request('/api/wallet/funding/webhook', options);
+  assert.equal(second.response.status, 200);
+  assert.equal(second.body.alreadyProcessed, true);
+
+  const afterSecond = await prisma.wallet.findUnique({ where: { userId } });
+  assert.equal(Number(afterSecond.balance), Number(afterFirst.balance));
+
+  const transactions = await prisma.transaction.findMany({
+    where: { userId, type: 'WALLET_FUNDING' },
+  });
+  assert.equal(transactions.filter(tx => tx.description === `Wallet funding ${fundingReference}`).length, 1);
+});
+
+test('funding webhook rejects amount mismatch without crediting wallet', async () => {
+  const fundingReference = `CAFDEP-${randomUUID().replaceAll('-', '').slice(0, 24).toUpperCase()}`;
+  await prisma.fundingOrder.create({
+    data: {
+      reference: fundingReference,
+      userId,
+      amount: '2500.00',
+      currency: 'NGN',
+      provider: 'paystack',
+      status: 'PENDING',
+    },
+  });
+
+  const payload = JSON.stringify({
+    reference: fundingReference,
+    providerReference: `paystack-${randomUUID()}`,
+    status: 'SUCCESS',
+    amount: 2500.01,
+    currency: 'NGN',
+  });
+  const signature = createHmac('sha512', 'ci-paystack-secret').update(payload).digest('hex');
+  const before = await prisma.wallet.findUnique({ where: { userId } });
+
+  const { response } = await request('/api/wallet/funding/webhook', {
+    method: 'POST',
+    headers: { 'x-paystack-signature': signature },
+    body: payload,
+  });
+  assert.equal(response.status, 400);
+
+  const after = await prisma.wallet.findUnique({ where: { userId } });
+  assert.equal(Number(after.balance), Number(before.balance));
+
+  const order = await prisma.fundingOrder.findUnique({ where: { reference: fundingReference } });
+  assert.equal(order.status, 'PENDING');
 });
 
 test('second user can register and authenticate', async () => {
