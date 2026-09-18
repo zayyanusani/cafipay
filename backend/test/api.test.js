@@ -402,6 +402,39 @@ test('transaction history includes transfer counterparty records', async () => {
   assert.ok(body.transactions.some(tx => tx.type === 'TRANSFER' && tx.recipientId === secondUserId));
 });
 
+test('idempotency key rejects missing, short, and mismatched reuse', async () => {
+  const missing = await request('/api/wallet/transfer', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}` },
+    body: JSON.stringify({ recipientEmail: secondEmail, amount: 10 }),
+  });
+  assert.equal(missing.response.status, 400);
+
+  const key = `idem-${randomUUID()}`;
+  const first = await request('/api/wallet/transfer', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': key },
+    body: JSON.stringify({ recipientEmail: secondEmail, amount: 10 }),
+  });
+  assert.equal(first.response.status, 201);
+
+  const mismatch = await request('/api/wallet/transfer', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': key },
+    body: JSON.stringify({ recipientEmail: secondEmail, amount: 11 }),
+  });
+  assert.equal(mismatch.response.status, 409);
+});
+
+test('invalid protected input returns a client error instead of a server error', async () => {
+  const { response } = await request('/api/wallet/transfer', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': `idem-${randomUUID()}` },
+    body: JSON.stringify({ recipientEmail: 'not-an-email', amount: -1 }),
+  });
+  assert.equal(response.status, 400);
+});
+
 test('audit logs are available to authenticated users', async () => {
   const { response, body } = await request('/api/audit-logs', {
     headers: { authorization: `Bearer ${token}` },
