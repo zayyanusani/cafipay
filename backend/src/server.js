@@ -21,12 +21,19 @@ const prisma = new PrismaClient();
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
 const JWT_SECRET = process.env.JWT_SECRET;
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
 if (!JWT_SECRET || JWT_SECRET.length < 32) throw new Error('JWT_SECRET must be set and contain at least 32 characters');
 
-app.set('trust proxy', 1);
+const trustProxy = process.env.TRUST_PROXY;
+if (trustProxy) app.set('trust proxy', trustProxy === 'true' ? 1 : Number(trustProxy));
+else app.set('trust proxy', false);
+
+const corsOrigins = process.env.CORS_ORIGIN?.split(',').map(s => s.trim()).filter(Boolean);
+if (NODE_ENV === 'production' && !corsOrigins?.length) throw new Error('CORS_ORIGIN must be set in production');
+
 app.use(helmet());
-app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',').map(s => s.trim()) || true }));
+app.use(cors({ origin: corsOrigins?.length ? corsOrigins : false }));
 app.use(express.json({ limit: '1mb', verify: (req, _res, buffer) => { req.rawBody = buffer.toString('utf8'); } }));
 app.use(auditRequests);
 
@@ -34,6 +41,7 @@ const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHea
 const qrCreateLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
 const qrPayLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
 const fundingLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false });
+const serviceLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false });
 const fundingWebhookLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false });
 
 const registerSchema = z.object({ name: z.string().trim().min(2).max(100), email: z.string().trim().email().max(254).transform(v => v.toLowerCase()), password: z.string().min(8).max(72) });
@@ -41,12 +49,16 @@ const loginSchema = z.object({ email: z.string().trim().email().transform(v => v
 const qrCreateSchema = z.object({ amount: z.coerce.number().positive().finite().max(100000000), currency: z.string().trim().length(3).default('NGN'), description: z.string().trim().max(200).optional(), expiresInMinutes: z.coerce.number().int().min(1).max(1440).default(30) });
 const qrReferenceSchema = z.object({ reference: z.string().regex(/^CAFQR-[A-Z0-9]{24}$/) });
 
-function signToken(user) { return jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }); }
+function signToken(user) { return jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { algorithm: 'HS256', expiresIn: process.env.JWT_EXPIRES_IN || '1h' }); }
 function auth(req, res, next) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Missing bearer token' });
-  try { const payload = jwt.verify(header.slice(7), JWT_SECRET); req.user = { id: payload.sub, email: payload.email }; next(); }
-  catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
+  try {
+    const payload = jwt.verify(header.slice(7), JWT_SECRET, { algorithms: ['HS256'] });
+    if (!payload || typeof payload !== 'object' || typeof payload.sub !== 'string' || typeof payload.email !== 'string') return res.status(401).json({ error: 'Invalid token payload' });
+    req.user = { id: payload.sub, email: payload.email };
+    next();
+  } catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
 }
 function qrReference() { return `CAFQR-${randomBytes(12).toString('hex').toUpperCase()}`; }
 function toMoney(value) { return Number(value).toFixed(2); }
@@ -165,7 +177,7 @@ app.post('/api/wallet/funding/webhook', fundingWebhookLimiter, async (req, res, 
 });
 
 app.use('/api/wallet/funding', auth, idempotency, fundingLimiter, fundingRoutes);
-app.use('/api/services', auth, idempotency, serviceRoutes);
+app.use('/api/services', auth, idempotency, serviceLimiter, serviceRoutes);
 app.use('/api/bills', auth, idempotency, billRoutes);
 app.use('/api/audit-logs', auth, auditRoutes);
 
