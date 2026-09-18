@@ -16,7 +16,8 @@ function requestHash(req) {
 }
 
 export async function idempotency(req, res, next) {
-  if (req.method !== 'POST' || !IDEMPOTENT_PATHS.has(req.path)) return next();
+  const requestPath = `${req.baseUrl || ''}${req.path}`;
+  if (req.method !== 'POST' || !IDEMPOTENT_PATHS.has(requestPath)) return next();
 
   const key = req.get('Idempotency-Key');
   if (!key || key.length < 16 || key.length > 128) {
