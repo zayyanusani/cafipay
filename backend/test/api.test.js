@@ -6,8 +6,10 @@ import { PrismaClient } from '@prisma/client';
 
 const port = Number(process.env.TEST_PORT || 4100);
 const baseUrl = `http://127.0.0.1:${port}`;
+const serverPath = new URL('../src/server.js', import.meta.url).pathname;
 const prisma = new PrismaClient();
 let serverProcess;
+let serverStartupError = '';
 let token;
 let secondToken;
 let userId;
@@ -27,19 +29,22 @@ async function request(path, options = {}) {
 async function waitForServer() {
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
+    if (serverProcess.exitCode !== null) {
+      throw new Error(`CafiPay API exited before startup (code ${serverProcess.exitCode}). ${serverStartupError}`.trim());
+    }
     try {
       const { response } = await request('/api/health');
       if (response.ok) return;
     } catch {}
     await new Promise(resolve => setTimeout(resolve, 250));
   }
-  throw new Error('CafiPay API did not start within 30 seconds');
+  throw new Error(`CafiPay API did not start within 30 seconds.${serverStartupError ? ` Startup error: ${serverStartupError}` : ''}`);
 }
 
 before(async () => {
   email = `test-${randomUUID()}@example.com`;
   secondEmail = `test-${randomUUID()}@example.com`;
-  serverProcess = spawn(process.execPath, ['src/server.js'], {
+  serverProcess = spawn(process.execPath, [serverPath], {
     cwd: new URL('..', import.meta.url).pathname,
     env: {
       ...process.env,
@@ -49,8 +54,10 @@ before(async () => {
       FUNDING_PROVIDER_API_KEY: '',
       FUNDING_WEBHOOK_SECRET: 'ci-webhook-secret',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
+  serverProcess.stderr.setEncoding('utf8');
+  serverProcess.stderr.on('data', chunk => { serverStartupError += chunk; });
   await waitForServer();
 });
 

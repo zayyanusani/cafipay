@@ -12,7 +12,7 @@
     "test": "node --test test/**/*.test.js"
   },
   "dependencies": {
-    "@prisma/client": "latest",
+    "@prisma/client": "6.16.2",
     "bcryptjs": "latest",
     "cors": "latest",
     "dotenv": "latest",
@@ -24,6 +24,6 @@
     "zod": "latest"
   },
   "devDependencies": {
-    "prisma": "latest"
+    "prisma": "6.16.2"
   }
 }

@@ -115,7 +115,7 @@ app.post('/api/qr/payments', auth, idempotency, qrCreateLimiter, async (req, res
 app.get('/api/qr/payments/:reference', async (req, res, next) => {
   try {
     const { reference } = qrReferenceSchema.parse(req.params);
-    const payment = await prisma.qrPayment.findUnique({ where: { reference }, select: { reference: true, amount: true, currency: true, description: true, status: true, expiresAt: true, createdAt: true, merchant: { select: { id: true, name: true, email: true } } });
+    const payment = await prisma.qrPayment.findUnique({ where: { reference }, select: { reference: true, amount: true, currency: true, description: true, status: true, expiresAt: true, createdAt: true, merchant: { select: { id: true, name: true, email: true } } } });
     if (!payment) return res.status(404).json({ error: 'QR payment not found' });
     if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) { await prisma.qrPayment.update({ where: { reference }, data: { status: 'EXPIRED' } }); return res.status(410).json({ error: 'QR payment has expired' }); }
     res.json({ payment });
