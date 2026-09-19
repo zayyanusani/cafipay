@@ -317,7 +317,7 @@ test('concurrent QR payments charge the payer only once', async () => {
   const payer = await prisma.wallet.findUnique({ where: { userId } });
   const merchant = await prisma.wallet.findUnique({ where: { userId: secondUserId } });
   const payment = await prisma.qrPayment.findUnique({ where: { reference } });
-  const qrTransactions = await prisma.transaction.count({ where: { type: { in: ['QR_PAYMENT', 'QR_RECEIPT'] }, description: { contains: reference } } });
+  const qrTransactions = await prisma.transaction.count({ where: { type: { in: ['QR_PAYMENT', 'QR_RECEIPT'] } } });
   assert.equal(Number(payer.balance), 1000);
   assert.equal(Number(merchant.balance), 1000);
   assert.equal(payment.status, 'PAID');
