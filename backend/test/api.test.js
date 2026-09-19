@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
+import jwt from 'jsonwebtoken';
 
 const port = Number(process.env.TEST_PORT || 4100);
 const baseUrl = `http://127.0.0.1:${port}`;
@@ -257,4 +258,67 @@ test('audit logs are available to authenticated users', async () => {
   assert.equal(response.status, 200);
   assert.ok(Array.isArray(body.logs));
   assert.ok(body.logs.length > 0);
+});
+
+test('JWT rejects tokens signed with an unexpected algorithm', async () => {
+  const secret = process.env.JWT_SECRET || 'ci-test-secret-at-least-32-characters-long';
+  const forgedToken = jwt.sign({ sub: userId, email }, secret, { algorithm: 'HS384', expiresIn: '1h' });
+  const { response } = await request('/api/auth/me', {
+    headers: { authorization: `Bearer ${forgedToken}` },
+  });
+  assert.equal(response.status, 401);
+});
+
+test('JWT rejects tokens with an invalid payload shape', async () => {
+  const secret = process.env.JWT_SECRET || 'ci-test-secret-at-least-32-characters-long';
+  const malformedToken = jwt.sign({ email }, secret, { algorithm: 'HS256', expiresIn: '1h' });
+  const { response } = await request('/api/auth/me', {
+    headers: { authorization: `Bearer ${malformedToken}` },
+  });
+  assert.equal(response.status, 401);
+});
+
+test('CORS allows the configured origin and rejects an unconfigured origin', async () => {
+  const allowed = await request('/api/health', { headers: { origin: 'http://localhost:3000' } });
+  assert.equal(allowed.response.status, 200);
+  assert.equal(allowed.response.headers.get('access-control-allow-origin'), 'http://localhost:3000');
+  const denied = await request('/api/health', { headers: { origin: 'https://evil.example' } });
+  assert.equal(denied.response.status, 200);
+  assert.equal(denied.response.headers.get('access-control-allow-origin'), null);
+});
+
+test('service API rate limit returns 429 after the configured threshold', async () => {
+  const responses = await Promise.all(Array.from({ length: 61 }, (_, index) => request(`/api/services/orders/SECURITY-RATE-LIMIT-${index}`, {
+    headers: { authorization: `Bearer ${token}` },
+  })));
+  assert.ok(responses.some(({ response }) => response.status === 429));
+  assert.ok(responses.some(({ response }) => response.status === 404));
+});
+
+test('concurrent QR payments charge the payer only once', async () => {
+  await prisma.wallet.update({ where: { userId }, data: { balance: '2000.00' } });
+  await prisma.wallet.update({ where: { userId: secondUserId }, data: { balance: '0.00' } });
+  const qr = await request('/api/qr/payments', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${secondToken}`, 'Idempotency-Key': `qr-concurrency-create-${randomUUID()}` },
+    body: JSON.stringify({ amount: 1000, currency: 'NGN', description: 'Concurrent QR security test' }),
+  });
+  assert.equal(qr.response.status, 201);
+  const reference = qr.body.payment.reference;
+  const results = await Promise.all([
+    request(`/api/qr/payments/${reference}/pay`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': `qr-concurrency-pay-a-${randomUUID()}` }, body: JSON.stringify({}) }),
+    request(`/api/qr/payments/${reference}/pay`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': `qr-concurrency-pay-b-${randomUUID()}` }, body: JSON.stringify({}) }),
+  ]);
+  const successful = results.filter(({ response }) => response.status === 201);
+  const conflicts = results.filter(({ response }) => response.status === 409);
+  assert.equal(successful.length, 1);
+  assert.equal(conflicts.length, 1);
+  const payer = await prisma.wallet.findUnique({ where: { userId } });
+  const merchant = await prisma.wallet.findUnique({ where: { userId: secondUserId } });
+  const payment = await prisma.qrPayment.findUnique({ where: { reference } });
+  const qrTransactions = await prisma.transaction.count({ where: { type: { in: ['QR_PAYMENT', 'QR_RECEIPT'] }, description: { contains: reference } } });
+  assert.equal(Number(payer.balance), 1000);
+  assert.equal(Number(merchant.balance), 1000);
+  assert.equal(payment.status, 'PAID');
+  assert.equal(qrTransactions, 2);
 });
