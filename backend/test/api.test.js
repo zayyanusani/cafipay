@@ -4,7 +4,6 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import jwt from 'jsonwebtoken';
-import jwt from 'jsonwebtoken';
 
 const port = Number(process.env.TEST_PORT || 4100);
 const baseUrl = `http://127.0.0.1:${port}`;
