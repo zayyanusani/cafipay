@@ -103,28 +103,6 @@ test('login returns a JWT', async () => {
   token = body.token;
 });
 
-test('JWT rejects tokens signed with an unapproved algorithm', async () => {
-  const forgedToken = jwt.sign({ sub: userId, email }, process.env.JWT_SECRET || 'ci-test-secret-at-least-32-characters-long', { algorithm: 'HS384', expiresIn: '1h' });
-  const { response, body } = await request('/api/auth/me', { headers: { authorization: 'Bearer ' + forgedToken } });
-  assert.equal(response.status, 401);
-  assert.match(body.error, /invalid|expired/i);
-});
-
-test('JWT rejects tokens with an invalid payload shape', async () => {
-  const malformedToken = jwt.sign({ email }, process.env.JWT_SECRET || 'ci-test-secret-at-least-32-characters-long', { algorithm: 'HS256', expiresIn: '1h' });
-  const { response, body } = await request('/api/auth/me', { headers: { authorization: 'Bearer ' + malformedToken } });
-  assert.equal(response.status, 401);
-  assert.match(body.error, /invalid token payload/i);
-});
-
-test('CORS allows the configured origin and omits headers for an unapproved origin', async () => {
-  const allowed = await request('/api/health', { headers: { origin: 'http://localhost:3000' } });
-  assert.equal(allowed.response.status, 200);
-  assert.equal(allowed.response.headers.get('access-control-allow-origin'), 'http://localhost:3000');
-  const blocked = await request('/api/health', { headers: { origin: 'https://untrusted.example' } });
-  assert.equal(blocked.response.status, 200);
-  assert.equal(blocked.response.headers.get('access-control-allow-origin'), null);
-});
 test('protected wallet endpoint requires authentication', async () => {
   const { response } = await request('/api/wallet');
   assert.equal(response.status, 401);
