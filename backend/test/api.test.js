@@ -103,7 +103,29 @@ test('login returns a JWT', async () => {
   token = body.token;
 });
 
-test('JWT rejects tokens signed with an unapproved algorithm', async () => {\n  const forgedToken = jwt.sign({ sub: userId, email }, process.env.JWT_SECRET || 'ci-test-secret-at-least-32-characters-long', { algorithm: 'HS384', expiresIn: '1h' });\n  const { response, body } = await request('/api/auth/me', { headers: { authorization: 'Bearer ' + forgedToken } });\n  assert.equal(response.status, 401);\n  assert.match(body.error, /invalid|expired/i);\n});\n\ntest('JWT rejects tokens with an invalid payload shape', async () => {\n  const malformedToken = jwt.sign({ email }, process.env.JWT_SECRET || 'ci-test-secret-at-least-32-characters-long', { algorithm: 'HS256', expiresIn: '1h' });\n  const { response, body } = await request('/api/auth/me', { headers: { authorization: 'Bearer ' + malformedToken } });\n  assert.equal(response.status, 401);\n  assert.match(body.error, /invalid token payload/i);\n});\n\ntest('CORS allows the configured origin and omits headers for an unapproved origin', async () => {\n  const allowed = await request('/api/health', { headers: { origin: 'http://localhost:3000' } });\n  assert.equal(allowed.response.status, 200);\n  assert.equal(allowed.response.headers.get('access-control-allow-origin'), 'http://localhost:3000');\n  const blocked = await request('/api/health', { headers: { origin: 'https://untrusted.example' } });\n  assert.equal(blocked.response.status, 200);\n  assert.equal(blocked.response.headers.get('access-control-allow-origin'), null);\n});\ntest('protected wallet endpoint requires authentication', async () => {
+test('JWT rejects tokens signed with an unapproved algorithm', async () => {
+  const forgedToken = jwt.sign({ sub: userId, email }, process.env.JWT_SECRET || 'ci-test-secret-at-least-32-characters-long', { algorithm: 'HS384', expiresIn: '1h' });
+  const { response, body } = await request('/api/auth/me', { headers: { authorization: 'Bearer ' + forgedToken } });
+  assert.equal(response.status, 401);
+  assert.match(body.error, /invalid|expired/i);
+});
+
+test('JWT rejects tokens with an invalid payload shape', async () => {
+  const malformedToken = jwt.sign({ email }, process.env.JWT_SECRET || 'ci-test-secret-at-least-32-characters-long', { algorithm: 'HS256', expiresIn: '1h' });
+  const { response, body } = await request('/api/auth/me', { headers: { authorization: 'Bearer ' + malformedToken } });
+  assert.equal(response.status, 401);
+  assert.match(body.error, /invalid token payload/i);
+});
+
+test('CORS allows the configured origin and omits headers for an unapproved origin', async () => {
+  const allowed = await request('/api/health', { headers: { origin: 'http://localhost:3000' } });
+  assert.equal(allowed.response.status, 200);
+  assert.equal(allowed.response.headers.get('access-control-allow-origin'), 'http://localhost:3000');
+  const blocked = await request('/api/health', { headers: { origin: 'https://untrusted.example' } });
+  assert.equal(blocked.response.status, 200);
+  assert.equal(blocked.response.headers.get('access-control-allow-origin'), null);
+});
+test('protected wallet endpoint requires authentication', async () => {
   const { response } = await request('/api/wallet');
   assert.equal(response.status, 401);
 });
@@ -251,7 +273,35 @@ test('transaction history includes transfer counterparty records', async () => {
   assert.ok(body.transactions.some(tx => tx.type === 'TRANSFER' && tx.recipientId === secondUserId));
 });
 
-test('authentication rate limit returns 429 after the configured threshold', async () => {\n  const attempts = Array.from({ length: 11 }, () => request('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'rate-limit-' + randomUUID() + '@example.com', password: 'WrongPassword123!' }) }));\n  const results = await Promise.all(attempts);\n  const statuses = results.map(({ response }) => response.status);\n  assert.ok(statuses.includes(429), 'Expected a 429 response, received: ' + statuses.join(', '));\n});\n\ntest('concurrent QR payments can settle only once', async () => {\n  await prisma.wallet.update({ where: { userId }, data: { balance: '2000.00' } });\n  await prisma.wallet.update({ where: { userId: secondUserId }, data: { balance: '0.00' } });\n  const created = await request('/api/qr/payments', { method: 'POST', headers: { authorization: 'Bearer ' + secondToken, 'Idempotency-Key': 'qr-create-' + randomUUID() }, body: JSON.stringify({ amount: 1000, currency: 'NGN', description: 'Concurrent QR test' }) });\n  assert.equal(created.response.status, 201);\n  const reference = created.body.payment.reference;\n  const [first, second] = await Promise.all([\n    request('/api/qr/payments/' + reference + '/pay', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'Idempotency-Key': 'qr-pay-' + randomUUID() }, body: JSON.stringify({}) }),\n    request('/api/qr/payments/' + reference + '/pay', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'Idempotency-Key': 'qr-pay-' + randomUUID() }, body: JSON.stringify({}) }),\n  ]);\n  const statuses = [first.response.status, second.response.status].sort((a, b) => a - b);\n  assert.deepEqual(statuses, [201, 409]);\n  const payer = await prisma.wallet.findUnique({ where: { userId } });\n  const merchant = await prisma.wallet.findUnique({ where: { userId: secondUserId } });\n  const payment = await prisma.qrPayment.findUnique({ where: { reference } });\n  const transactions = await prisma.transaction.findMany({ where: { userId: { in: [userId, secondUserId] }, type: { in: ['QR_PAYMENT', 'QR_RECEIPT'] } } });\n  assert.equal(Number(payer.balance), 1000);\n  assert.equal(Number(merchant.balance), 1000);\n  assert.equal(payment.status, 'PAID');\n  assert.equal(transactions.length, 2);\n});\ntest('audit logs are available to authenticated users', async () => {
+test('authentication rate limit returns 429 after the configured threshold', async () => {
+  const attempts = Array.from({ length: 11 }, () => request('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'rate-limit-' + randomUUID() + '@example.com', password: 'WrongPassword123!' }) }));
+  const results = await Promise.all(attempts);
+  const statuses = results.map(({ response }) => response.status);
+  assert.ok(statuses.includes(429), 'Expected a 429 response, received: ' + statuses.join(', '));
+});
+
+test('concurrent QR payments can settle only once', async () => {
+  await prisma.wallet.update({ where: { userId }, data: { balance: '2000.00' } });
+  await prisma.wallet.update({ where: { userId: secondUserId }, data: { balance: '0.00' } });
+  const created = await request('/api/qr/payments', { method: 'POST', headers: { authorization: 'Bearer ' + secondToken, 'Idempotency-Key': 'qr-create-' + randomUUID() }, body: JSON.stringify({ amount: 1000, currency: 'NGN', description: 'Concurrent QR test' }) });
+  assert.equal(created.response.status, 201);
+  const reference = created.body.payment.reference;
+  const [first, second] = await Promise.all([
+    request('/api/qr/payments/' + reference + '/pay', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'Idempotency-Key': 'qr-pay-' + randomUUID() }, body: JSON.stringify({}) }),
+    request('/api/qr/payments/' + reference + '/pay', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'Idempotency-Key': 'qr-pay-' + randomUUID() }, body: JSON.stringify({}) }),
+  ]);
+  const statuses = [first.response.status, second.response.status].sort((a, b) => a - b);
+  assert.deepEqual(statuses, [201, 409]);
+  const payer = await prisma.wallet.findUnique({ where: { userId } });
+  const merchant = await prisma.wallet.findUnique({ where: { userId: secondUserId } });
+  const payment = await prisma.qrPayment.findUnique({ where: { reference } });
+  const transactions = await prisma.transaction.findMany({ where: { userId: { in: [userId, secondUserId] }, type: { in: ['QR_PAYMENT', 'QR_RECEIPT'] } } });
+  assert.equal(Number(payer.balance), 1000);
+  assert.equal(Number(merchant.balance), 1000);
+  assert.equal(payment.status, 'PAID');
+  assert.equal(transactions.length, 2);
+});
+test('audit logs are available to authenticated users', async () => {
   const { response, body } = await request('/api/audit-logs', {
     headers: { authorization: `Bearer ${token}` },
   });
